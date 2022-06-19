@@ -9,6 +9,7 @@
         <h1>Building a custom embedded Linux distribution with Yocto</h1>
         <ul>
             <li>Published 2022-06-19</li>
+            <li>Updated 2022-06-19</li>
         </ul>
         <h2>Introduction</h2>
         <p>
@@ -72,7 +73,7 @@
         </p>
         <h3>Fetching sources and configuring Yocto</h3>
         <p>
-            The following steps can be done automatically with ./scripts/fetch.sh
+            The following steps can be done automatically with ./scripts/fetch.sh.
         </p>
         <p>
             Once the build environment is set up, you need to fetch poky, the Yocto reference distribution; and meta-ti, the "layer" to support our TI based board.
@@ -106,7 +107,7 @@
       /ws/x15/sources/meta-ti/meta-ti-bsp \
       "
 </pre>
-            will do
+            will do.
         </p>
         <p>
             Next we need local.conf, describing configuration options for the entire build.
@@ -137,17 +138,17 @@
         </p>
         <p>
             The build will take an hour or more even on a reasonably powerful dev machine. On an AWS c6g4xlarge, it takes about 45 minutes.
-            When it completes, you'll have a file /ws/x15/build/tmp/deploy/images/beagle-x15/core-image-minimal-beagle-x15.wic.xz, and an associated bmap file.
+            When it completes, you'll have a file /ws/x15/build/tmp/deploy/images/beagle-x15/core-image-minimal-beagle-x15.wic.xz, and an associated bmap file. Copy it out of the container, then flash it to your SD card.
 <pre>
-    bmaptool copy core-image-minimal-beagle-x15.wic.xz /dev/mmcblk0
+    # bmaptool copy core-image-minimal-beagle-x15.wic.xz /dev/mmcblk0
 </pre>
             will use the XML description in the bmap file to format the sd card at /dev/mmcblk0.
             As always take care that this device is actually the one you intend to format.
         </p>
         <p>
-            Unfortunately the image as created did not boot for me.
-            u-boot seemed very confused about the MMC device and partition it was supposed to boot from, as well as the root device.
-            I had to mount /dev/mmcblk0p1 and add the following uEnv.txt:
+            Unfortunately, I wasn't able to boot this image without modifying it.
+            u-boot had settings for MMC device, partition, and rootfs that didn't match the image we created.
+            I had to mount /dev/mmcblk0p1 (our image's /boot) and add the following uEnv.txt:
 <pre>
 /mnt/uEnv.txt
     mmcdev=0
