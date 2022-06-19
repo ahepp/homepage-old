@@ -1,0 +1,166 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>ahepp.dev</title>
+        <link rel="stylesheet" href="../style.css" />
+    </head>
+    <body>
+        <h1>Building a custom embedded Linux distribution with Yocto</h1>
+        <ul>
+            <li>Published 2022-06-19</li>
+        </ul>
+        <h2>Introduction</h2>
+        <p>
+            <a href="https://www.yoctoproject.org">Yocto</a> is an incredibly powerful tool for creating embedded Linux distributions.
+            In this post, I'll discuss why I love it, and guide you through building a minimal image for the open hardware <a href="https://beagleboard.org/x15">BeagleBoard X15</a>
+        </p>
+        <p>
+            There are a few things I love about Yocto.
+        </p>
+        <p>
+            The first is that it provides a really great cross-compilation platform.
+            It's 2022, don't build your software on-target.
+            Use a powerful build server to produce an image with Yocto.
+        </p>
+        <p>
+            Cross-compliation can be a huge pain in the ass.
+            Yocto makes the pain stop.
+            Never worry about host pollution again.
+        </p>
+        <p>
+            Yocto also helps you manage the configuration of your Linux distribution.
+            "Recipes" for software in the distribution are specified with git commit hashes.
+            Tracking the recipes themselves on git allows you to know exactly what software is in a release, and rebuild the release whenever necessary.
+        </p>
+        <p>
+            Nothing in life is free, and Yocto has its costs too.
+            Setting up a Yocto project can be complicated.
+            At work, there are currently a handful of people who have fallen into "maintainer" roles.
+            However, I think with a little bit of hands-on experience, most developers will be able to confidently create new recipes from existing ones.
+        </p>
+        <h2>Getting started</h2>
+        <h3>Docker setup</h3>
+        <p>
+            In the following <a href="https://github.com/ahepp/x15">git repository</a> you'll find a Dockerfile describing the dependencies for the Yocto project.
+        </p>
+        <p>
+            The Dockerfile assumes your uid/gid is 1000:1000.
+        </p>
+        <p>
+            The following two steps are optional.
+            If you want, you can skip them, and use the Dockerfile as a guide to set up your local environment.
+            If you run into issues, I'd love to hear about it so I can fix these instructions.
+            My email is andrew.hepp at this domain.
+        </p>
+        <p>
+            To build the Docker image, run:
+<pre>
+    $ docker build . -t $X15_IMAGE
+</pre>
+            where $X15_IMAGE is your preferred name for the image.
+        </p>
+        <p>
+            Next, instantiate a container based on the image.
+            Bind mount the host system's working directory to the container path /ws.
+            Optionally, mount a Docker volume at /ws/x15 to hold the source and build directories.
+            I did this to work around some issues with Docker for MacOS (specifically, the case sensitive native filesystem).
+<pre>
+    $ docker run -it -v $(pwd):/ws -v $X15_VOLUME:/ws/x15 $X15_IMAGE
+</pre>
+            where $X15_VOLUME is your preferred name for the volume.
+        </p>
+        <h3>Fetching sources and configuring Yocto</h3>
+        <p>
+            The following steps can be done automatically with ./scripts/fetch.sh
+        </p>
+        <p>
+            Once the build environment is set up, you need to fetch poky, the Yocto reference distribution; and meta-ti, the "layer" to support our TI based board.
+            meta-ti depends in turn on meta-arm, so we'll fetch that too.
+            We'll store these layers in /ws/x15/sources.
+            Note that this is not the source for our custom software, it's the source for the recipes on how to build that software.
+<pre>
+    $ mkdir -p /ws/x15/sources
+    $ git clone -b kirkstone git://git.yoctoproject.org/poky     /ws/x15/sources/poky
+    $ git clone -b kirkstone git://git.yoctoproject.org/meta-ti  /ws/x15/sources/meta-ti
+    $ git clone -b kirkstone git://git.yoctoproject.org/meta-arm /ws/x15/sources/meta-arm
+</pre>
+        </p>
+        <p>
+            Our build will be done in /ws/x15/build. 
+            We need to create a couple configuration files in /ws/x15/build/conf.
+            First we need bblayers.conf, describing the layers Yocto will use.
+
+<pre>
+/ws/x15/build/conf/bblayers.conf
+    POKY_BBLAYERS_CONF_VERSION = "2"
+
+    BBPATH = "${TOPDIR}"
+    BBFILES ?= ""
+
+    BBLAYERS ?= " \
+      /ws/x15/sources/poky/meta \
+      /ws/x15/sources/poky/meta-poky \
+      /ws/x15/sources/meta-arm/meta-arm \
+      /ws/x15/sources/meta-arm/meta-arm-toolchain \
+      /ws/x15/sources/meta-ti/meta-ti-bsp \
+      "
+</pre>
+            will do
+        </p>
+        <p>
+            Next we need local.conf, describing configuration options for the entire build.
+            We'll only add a version number and a string telling Yocto what our machine is.
+<pre>
+/ws/x15/build/conf/local.conf
+    CONF_VERSION = "2"                                                                
+    MACHINE="beagle-x15"
+</pre>
+        </p>
+        <h3>Building an image</h3>
+        <p>
+            The hard part is done.
+            As with fetching, we could simply run ./scripts/build.sh.
+            If you want to see how the sausage is made, source the openembedded setup script, telling it our build directory:
+            The final product can be found <a href="https://ahepp.dev/x15/x15-image.master-b1-ce23e85b1bba5e3a8b36c93b849e50de063cca14c">here</a>.
+            This file is an uncompressed tar archive containing a wic.xz and bmap.
+            Note that this image will not boot without the uEnv.txt mentioned at the end of this article.
+<pre>
+    $ . /ws/x15/sources/poky/meta/oe-init-build-env /ws/x15/build
+</pre>
+        </p>
+        <p>
+            You should now be able to run
+<pre>
+    $ bitbake core-image-minimal
+</pre>
+        </p>
+        <p>
+            The build will take an hour or more even on a reasonably powerful dev machine. On an AWS c6g4xlarge, it takes about 45 minutes.
+            When it completes, you'll have a file /ws/x15/build/tmp/deploy/images/beagle-x15/core-image-minimal-beagle-x15.wic.xz, and an associated bmap file.
+<pre>
+    bmaptool copy core-image-minimal-beagle-x15.wic.xz /dev/mmcblk0
+</pre>
+            will use the XML description in the bmap file to format the sd card at /dev/mmcblk0.
+            As always take care that this device is actually the one you intend to format.
+        </p>
+        <p>
+            Unfortunately the image as created did not boot for me.
+            u-boot seemed very confused about the MMC device and partition it was supposed to boot from, as well as the root device.
+            I had to mount /dev/mmcblk0p1 and add the following uEnv.txt:
+<pre>
+/mnt/uEnv.txt
+    mmcdev=0
+    bootpart=0:1
+    bootdir=
+    args_mmc=run finduuid;setenv bootargs console=${console} ${optargs} root=/dev/mmcblk0p2 rw rootfstype=${mmcrootfstype}
+</pre>
+        </p>
+        <p>
+            Figuring out the best way to fix this will be a future project.
+            It's not immediately clear to me whether this should be patched in meta-ti, or dealt with in a custom layer.
+            I haven't messed with the bootloader on this board, so I expected the image to boot out of the box.
+            Anyways, it gave me the chance to learn a bit about u-boot, so I won't complain too much.
+        </p>
+    </body>
+</html>
