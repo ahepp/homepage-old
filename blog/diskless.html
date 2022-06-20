@@ -1,0 +1,150 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>ahepp.dev</title>
+        <link rel="stylesheet" href="../style.css" />
+    </head>
+    <body>
+        <h1>Diskless Debian with PXE and iSCSI</h1>
+        <ul>
+            <li>Published 2022-06-19</li>
+        </ul>
+        <h2>Introduction</h2>
+        <p>
+            I have an old gaming desktop whose hard drives have been reappropriated for more important things.
+            Since switching my server to BSD, I've missed some Linux features.
+            I'd also like to separate essential backbone services like NFS, from less critical ones (this website, plex, etc).
+        </p>
+        <p>
+            Instead of buying a new hard drive for the desktop, I'd like to make it run completely diskless.
+            PXE boot, root on iSCSI.
+        </p>
+        <h2>PXE Boot</h2>
+        <p>
+            The first thing I'll do is use the desktop's built in PXE functionality to chainload the more full featured iPXE.
+            Information about the file to boot is sent over DHCP.
+            The PXE client then loads the indicated file via TFTP, and boots it.
+        </p>
+        <p>
+            My Mikrotik router's DHCP server doesn't have a great way to provide different boot filenames to different DHCP clients.
+            This is important because the first PXE client needs to load iPXE, then iPXE needs to load our real boot file.
+        </p>
+        <p>
+            To solve the problem, we'll set up dnsmasq on the fileserver to act as a proxy DHCP server.
+            No modifications to the primary DHCP server are necessary.
+            dnsmasq seems to be the only well known dhcp software with support for proxy DHCP, and can also act as a TFTP server.
+        </p>
+        <p>
+            The configuration stumped me for a while, but the iPXE website has a great <a href="https://ipxe.org/appnote/proxydhcp">starting point</a>.
+            You'll need to set your IP address, interface, and tftp root.
+            In the following snippet, we'll create a ZFS dataset for TFTP files, upload the iPXE executable, and configure dnsmasq:
+<pre>
+    ➜  ~ ssh tlon
+    root@tlon:~ # exit
+    ➜  ~ ssh tlon "zfs create zpa/tftp"
+    ➜  ~ scp ~/Downloads/undionly.kpxe tlon:/zpa/tftp/
+    ➜  ~ ssh tlon
+    root@tlon:~ # pkg install -y dnsmasq
+    root@tlon:~ # vi /usr/local/etc/dnsmasq.conf
+    root@tlon:~ # sysrc dnsmasq_enable="YES"
+    root@tlon:~ # service dnsmasq start
+</pre>
+        </p>
+        <p>
+            This is enough to get us booting iPXE.
+            Later we'll come back and tell iPXE what to boot.
+        </p>
+        <p>
+            Now we'll create a new ZFS dataset with some ZVOLs to back our iSCSI LUNs, and configure the iSCSI target.
+<pre>
+    root@tlon:~ # zfs create -o mountpoint=none zpa/iscsi
+    root@tlon:~ # zfs create -V 4G zpa/iscsi/debian0-0
+    root@tlon:~ # echo &lt;&lt; EOF &gt; /etc/ctl.conf
+    portal-group pg0 {
+        discovery-auth-group no-authentication
+        listen 0.0.0.0
+    }
+    target iqn.2022-06.lan.tlon:debian0{
+        auth-group no-authentication
+        portal-group pg0
+        lun 0 {
+            path /dev/zvol/zpa/iscsi/debian0-0
+            size 4G
+        }
+    }
+    EOF
+    root@tlon:~ # sysrc ctld_enable="YES"
+    root@tlon:~ # service ctld start
+</pre>
+        </p>
+        <h2>Configuring Debian</h2>
+        <p>
+            Starting from a working Debian
+<pre>
+    debian@debian:~$ sudo apt install open-iscsi debootstrap
+    debian@debian:~$ sudo iscsiadm --mode discovery --op update --type sendtargets --portal tlon.lan
+    tlon.lan:3260,-1 iqn.2022-06.lan.tlon:debian0:
+    debian@debian:~$ sudo iscsiadm --mode node --targetname "iqn.2022-06.lan.tlon:debian0" --portal tlon.lan --login
+    Logging in to [iface: default, target: iqn.2022-06.lan.tlon:debian0, portal: tlon.lan,3260]
+    Login to [iface: default, target: iqn.2022-06.lan.tlon:debian0, portal: tlon.lan,3260] successful.
+    /dev/disk/by-path/ip-tlon.lan:3260-iscsi-iqn.2022-06.lan.tlon:debian0-lun-0
+    debian@debian:~$ sudo mkfs.ext4 /dev/disk/by-path/ip-tlon.lan\:3260-iscsi-iqn.2022-06.lan.tlon\:debian0-lun-0
+    debian@debian:~$ sudo mount /dev/disk/by-path/ip-tlon.lan\:3260-iscsi-iqn.2022-06.lan.tlon\:debian0-lun-0 /mnt
+    debian@debian:~$ sudo debootstrap bullseye /mnt
+    debian@debian:~$ sudo mount -o bind /dev /mnt/dev
+    debian@debian:~$ sudo mount -t sysfs none /mnt/sys
+    debian@debian:~$ sudo mount -t proc none /mnt/proc
+    debian@debian:~$ sudo chroot /mnt/
+    root@debian:/# passwd
+    root@debian:/# adduser debian
+    root@debian:/# apt install openssh-server
+    root@debian:/# echo '127.0.0.1 debian0 localhost' &gt; /etc/hosts
+    root@debian:/# echo debian0 &gt; /etc/hostname"
+    root@debian:/# echo '/dev/sda / ext4 defaults 0 1' &gt; /etc/fstab
+    root@debian:/# apt install open-iscsi
+    root@debian:/# cat &lt;&lt; EOF &gt; /etc/iscsi/initiatorname.iscsi
+    InitiatorName=iqn.1993-08.org.debian:01:debian0
+    EOF
+    root@debian:/# cat &lt;&lt; EOF &gt; /etc/iscsi/iscsi.initramfs
+    ISCSI_INITIATOR=iqn.1993-08.org.debian:01:debian0
+    ISCSI_TARGET_NAME=iqn.2022-06.lan.tlon:debian0
+    ISCSI_TARGET_IP=10.128.1.2
+    EOF
+    root@debian:/# apt install initramfs-tools
+    root@debian:/# echo iscsi &gt;&gt; /etc/initramfs-tools/modules
+    root@debian:/# apt install linux-image-amd64          
+</pre>
+        </p>
+        <p>
+            Copy the initrd.img and vmlinuz files in /mnt/boot to your TFTP server.
+        </p>
+        <p>
+            Now lets take another look at making iPXE boot our OS.
+            The initramfs we produced above will import our iSCSI target as /dev/sda
+<pre>
+    ➜  ~ ssh tlon
+    root@tlon:~ # cat &lt;&lt; EOF &gt; /zpa/tftpboot/debian0.ipxe
+    #!ipxe
+    initrd tftp://tlon.lan/initrd.img-5.10.0-13-amd64
+    kernel tftp://tlon.lan/vmlinuz-5.10.0-13-amd64 root=/dev/sda
+    boot
+    EOF
+</pre>
+        </p>
+        <p>
+            Now we need to edit /usr/local/etc/dnsmasq.conf on our fileserver to provide the ipxe client debian0.ipxe.
+            And just like that, we're booting Debian with zero nonvolatile storage in our computer!
+        </p>
+        <h2>Improvements</h2>
+        <p>
+            You may have noticed an IP address in ISCSI_TARGET for the initramfs.
+            I ran into issues with DNS resolution in the initramfs.
+            Ideally I'd be able to change the IP address of my server without having to come back and update all my initrd.img's.
+        </p>
+        <p>
+            I'd also like to find a good way to create new initrds, kernels, and root filesystems automatically.
+            Manually mounting and configuring is fine for experimentation, but I'd like to script this.
+        </p>
+    </body>
+</html>
