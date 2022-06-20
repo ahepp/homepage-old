@@ -9,16 +9,14 @@
         <h1>Diskless Debian with PXE and iSCSI</h1>
         <ul>
             <li>Published 2022-06-19</li>
+            <li>Updated 2022-06-19</li>
         </ul>
         <h2>Introduction</h2>
         <p>
             I have an old gaming desktop whose hard drives have been reappropriated for more important things.
-            Since switching my server to BSD, I've missed some Linux features.
-            I'd also like to separate essential backbone services like NFS, from less critical ones (this website, plex, etc).
-        </p>
-        <p>
-            Instead of buying a new hard drive for the desktop, I'd like to make it run completely diskless.
-            PXE boot, root on iSCSI.
+            Since switching my main fileserver to BSD, I've missed some Linux features.
+            I'd like to set this old desktop up as a Linux server, using only network based storage.
+            This will let me run non-critical services in Docker, while reducing the complexity of my critical BSD server.
         </p>
         <h2>PXE Boot</h2>
         <p>
@@ -42,8 +40,9 @@
 <pre>
     ➜  ~ ssh tlon
     root@tlon:~ # exit
-    ➜  ~ ssh tlon "zfs create zpa/tftp"
-    ➜  ~ scp ~/Downloads/undionly.kpxe tlon:/zpa/tftp/
+    ➜  ~ curl -O http://boot.ipxe.org/undionly.kpxe
+    ➜  ~ ssh tlon "zfs create zpool/tftp"
+    ➜  ~ scp undionly.kpxe tlon:/zpool/tftp/
     ➜  ~ ssh tlon
     root@tlon:~ # pkg install -y dnsmasq
     root@tlon:~ # vi /usr/local/etc/dnsmasq.conf
@@ -52,14 +51,14 @@
 </pre>
         </p>
         <p>
-            This is enough to get us booting iPXE.
-            Later we'll come back and tell iPXE what to boot.
+            This is enough to get the desktop booting iPXE.
+            We'll revisit this later to boot our OS.
         </p>
         <p>
             Now we'll create a new ZFS dataset with some ZVOLs to back our iSCSI LUNs, and configure the iSCSI target.
 <pre>
-    root@tlon:~ # zfs create -o mountpoint=none zpa/iscsi
-    root@tlon:~ # zfs create -V 4G zpa/iscsi/debian0-0
+    root@tlon:~ # zfs create -o mountpoint=none zpool/iscsi
+    root@tlon:~ # zfs create -V 4G zpool/iscsi/debian0-0
     root@tlon:~ # echo &lt;&lt; EOF &gt; /etc/ctl.conf
     portal-group pg0 {
         discovery-auth-group no-authentication
@@ -69,7 +68,7 @@
         auth-group no-authentication
         portal-group pg0
         lun 0 {
-            path /dev/zvol/zpa/iscsi/debian0-0
+            path /dev/zvol/zpool/iscsi/debian0-0
             size 4G
         }
     }
@@ -80,7 +79,8 @@
         </p>
         <h2>Configuring Debian</h2>
         <p>
-            Starting from a working Debian
+            We'll use a freshly installed Debian external SSD to mount the iSCSI LUN.
+            Then we'll format the LUN with an ext4 filesystem and install Debian.
 <pre>
     debian@debian:~$ sudo apt install open-iscsi debootstrap
     debian@debian:~$ sudo iscsiadm --mode discovery --op update --type sendtargets --portal tlon.lan
@@ -88,7 +88,6 @@
     debian@debian:~$ sudo iscsiadm --mode node --targetname "iqn.2022-06.lan.tlon:debian0" --portal tlon.lan --login
     Logging in to [iface: default, target: iqn.2022-06.lan.tlon:debian0, portal: tlon.lan,3260]
     Login to [iface: default, target: iqn.2022-06.lan.tlon:debian0, portal: tlon.lan,3260] successful.
-    /dev/disk/by-path/ip-tlon.lan:3260-iscsi-iqn.2022-06.lan.tlon:debian0-lun-0
     debian@debian:~$ sudo mkfs.ext4 /dev/disk/by-path/ip-tlon.lan\:3260-iscsi-iqn.2022-06.lan.tlon\:debian0-lun-0
     debian@debian:~$ sudo mount /dev/disk/by-path/ip-tlon.lan\:3260-iscsi-iqn.2022-06.lan.tlon\:debian0-lun-0 /mnt
     debian@debian:~$ sudo debootstrap bullseye /mnt
@@ -124,7 +123,7 @@
             The initramfs we produced above will import our iSCSI target as /dev/sda
 <pre>
     ➜  ~ ssh tlon
-    root@tlon:~ # cat &lt;&lt; EOF &gt; /zpa/tftpboot/debian0.ipxe
+    root@tlon:~ # cat &lt;&lt; EOF &gt; /zpool/tftpboot/debian0.ipxe
     #!ipxe
     initrd tftp://tlon.lan/initrd.img-5.10.0-13-amd64
     kernel tftp://tlon.lan/vmlinuz-5.10.0-13-amd64 root=/dev/sda
@@ -134,17 +133,30 @@
         </p>
         <p>
             Now we need to edit /usr/local/etc/dnsmasq.conf on our fileserver to provide the ipxe client debian0.ipxe.
+            I'll leave this as an exercise to the reader, since the T in TFTP stands for trivial.
+            Seriously though, if you read this far and want my dnsmasq.conf, email me and I will update.
+        </p>
+        <p>
             And just like that, we're booting Debian with zero nonvolatile storage in our computer!
         </p>
         <h2>Improvements</h2>
         <p>
-            You may have noticed an IP address in ISCSI_TARGET for the initramfs.
+            You may have noticed a raw IP address in ISCSI_TARGET for the initramfs.
             I ran into issues with DNS resolution in the initramfs.
+            This <a href="https://wiki.gentoo.org/wiki/Custom_Initramfs#DNS">gentoo wiki post</a> seems to have a solution I'd like to try when I have some time.
             Ideally I'd be able to change the IP address of my server without having to come back and update all my initrd.img's.
+        </p>
+        <p>
+            I took a shortcut and configured dnsmasq to serve our debian0 LUN to all iPXE clients.
+            I probably want to restrict that to a particular MAC address, so I could have a different client boot a different LUN as root.
         </p>
         <p>
             I'd also like to find a good way to create new initrds, kernels, and root filesystems automatically.
             Manually mounting and configuring is fine for experimentation, but I'd like to script this.
         </p>
+        <h2>Sources</h2>
+        <ul>
+            <li><a href="https://devcondition.com/article/iscsi-boot/">https://devcondition.com/article/iscsi-boot/</a></li>
+            <li><a href="https://web.archive.org/web/20140913155921/http://linux.netapp.com/docs/debian/iscsi-sanboot-configuration-guide">https://web.archive.org/web/20140913155921/http://linux.netapp.com/docs/debian/iscsi-sanboot-configuration-guide</a></li>
     </body>
 </html>
